@@ -1,53 +1,117 @@
 import { test, expect } from '@playwright/test';
+import { USERNAME, PASSWORD } from '../config/env-data';
 
-const serviceURL = 'http://localhost:3000';
+import { LoanCalculatorPage } from './pages/loan-calculator.page';
+import { LoginPopupPage } from './pages/login-popup.page';
+import { FinalPage } from './pages/final-page.page';
 
-test('default flow with mock', async ({page}) => {
-    // we have to define mock before navigation to the page
-    // our json response is
-    // {"paymentAmountMonthly":42.8}
-    // response code is 200
-    // response headers is application/json
-    // route to intercept is https:
+import fs from 'fs';
+import path from 'path';
 
-    // define the response body as json object
-    const amountValue: string = '22.3'
-    const amountResponse = {paymentAmountMonthly: amountValue};
 
-    // intercept the route only for specific query parameters (default values)
-    await page.route('**/api/loan-calc?amount=500&period=12', async route => {
-        await route.fulfill({
-            json: amountResponse,
-            // status: 200 by default
-            // status: 400 in case of error
-        });
+test('network logging', async ({ page }) => {
+    const networkLog: string[] = [];
+
+    page.on('request', (request) => {
+        networkLog.push(
+            `REQUEST: ${request.method()} ${request.url()}`
+        );
     });
 
-    await page.goto(serviceURL);
-    await expect(page.getByTestId('ib-small-loan-calculator-field-monthlyPayment')).toBeVisible();
-    const textContentElement = await page.getByTestId('ib-small-loan-calculator-field-monthlyPayment').textContent()
-    console.log(textContentElement)
-    const monthlyValue = textContentElement?.replace('€', '').trim() ?? ''
-    expect(monthlyValue).toBe(amountValue);
-})
+    page.on('response', (response) => {
+        networkLog.push(
+            `RESPONSE: ${response.status()} ${response.url()}`
+        );
+    });
 
-test('main flow', async ({ page }) => {
-  await page.goto(serviceURL);
-  await page.getByTestId('id-small-loan-calculator-field-apply').click();
-  await page.getByTestId('login-popup-username-input').click();
-  await page.getByTestId('login-popup-username-input').fill('usern');
-  await page.getByTestId('login-popup-username-input').press('Tab');
-  await page.getByTestId('login-popup-password-input').fill('pwd');
-  await page.getByTestId('login-popup-continue-button').click();
-  await page.getByTestId('final-page-continue-button').click();
-  await page.getByTestId('final-page-success-ok-button').click();
+    const loanCalculator = new LoanCalculatorPage(page);
+
+    await loanCalculator.goto();
+    await page.waitForTimeout(2000);
+
+    const logDirectory = path.resolve(__dirname, '../test-results');
+
+    fs.mkdirSync(logDirectory, { recursive: true });
+
+    fs.writeFileSync(
+        path.join(logDirectory, 'network-log.txt'),
+        networkLog.join('\n'),
+        'utf-8'
+    );
+
+    console.log(`Network events saved: ${networkLog.length}`);
 });
 
-test('redirect flow', async ({ page, request }) => {
-  await page.goto(serviceURL);
-  await page.getByTestId('id-image-element-button-image-1').click();
-  await expect( page.getByTestId('id-small-loan-calculator-field-apply') ).toBeInViewport()
-  await page.getByTestId('id-image-element-button-image-2').click();
-  await expect( page.getByTestId('id-small-loan-calculator-field-apply') ).toBeInViewport()
-})
 
+test('main flow', async ({ page }) => {
+    // Page Objects
+    const loanCalculator = new LoanCalculatorPage(page);
+    const loginPopup = new LoginPopupPage(page);
+
+    // 1. Open Loan Calculator
+    await loanCalculator.goto();
+
+    // 2. Set loan parameters
+    await loanCalculator.setAmount('500');
+    await loanCalculator.setPeriod('12');
+
+    // 3. Calculate loan
+    await loanCalculator.calculate();
+
+    await expect(loanCalculator.monthlyPayment).toContainText('€', {
+        timeout: 15000,
+    });
+
+    await expect(loanCalculator.errorMessage).toHaveCount(0);
+    await expect(loanCalculator.applyButton).toBeEnabled();
+
+    // 4. Apply for loan
+    await loanCalculator.apply();
+
+    // 5. Login
+    await expect(loginPopup.usernameInput).toBeVisible();
+
+    const finalPage = await loginPopup.login(USERNAME, PASSWORD);
+
+    // 6. Verify Loan Details
+    await expect(page).toHaveURL(/loan-decision/);
+
+    await expect(finalPage.amount).toHaveText('500 €');
+    await expect(finalPage.monthlyPayment).toContainText('€');
+    await expect(finalPage.period).toHaveText('12 months');
+    await expect(finalPage.fullName).toBeVisible();
+
+    // 7. Continue to Income Page
+    const incomePage = await finalPage.continue();
+
+    // 8. Verify Income Page
+    await expect(incomePage.monthlyIncomeInput).toBeVisible();
+    await expect(incomePage.submitButton).toBeDisabled();
+
+    // 9. Enter Monthly Income
+    await incomePage.setMonthlyIncome('2000');
+
+    await expect(incomePage.submitButton).toBeEnabled();
+
+    // 10. Get Decision
+    const decisionPage = await incomePage.getDecision();
+
+    // 11. Verify Decision Page
+    await expect(decisionPage.okButton).toBeVisible();
+    await expect(decisionPage.title).toBeVisible();
+});
+
+
+test('redirect flow', async ({ page }) => {
+    const loanCalculator = new LoanCalculatorPage(page);
+
+    await loanCalculator.goto();
+
+    await loanCalculator.clickImageButton1();
+
+    await expect(loanCalculator.applyButton).toBeInViewport();
+
+    await loanCalculator.clickImageButton2();
+
+    await expect(loanCalculator.applyButton).toBeInViewport();
+});
